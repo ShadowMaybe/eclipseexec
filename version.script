@@ -1,0 +1,8 @@
+{
+    global:
+        JNI_OnLoad;
+        JNI_OnUnload;
+        eclipseexec_*;
+    local:
+        *;
+};

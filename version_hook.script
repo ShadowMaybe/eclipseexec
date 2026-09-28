@@ -1,0 +1,15 @@
+/*
+ * libeclipsehook.so is loaded into the driver namespace ahead of the Vulkan
+ * loader, which then resolves these four names from it. Nothing else in this
+ * library is anybody else's business: the arm entry is called from
+ * eclipseexec, the other three are the interposed loader entries.
+ */
+{
+    global:
+        eclipse_hook_arm;
+        android_dlopen_ext;
+        android_load_sphal_library;
+        atrace_get_enabled_tags;
+    local:
+        *;
+};

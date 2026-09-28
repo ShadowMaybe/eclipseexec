@@ -1,0 +1,12 @@
+# Consistent line endings: shell scripts and gradlew must stay LF or they
+# break on checkout, gradlew.bat must stay CRLF or cmd.exe chokes on it.
+* text=auto
+*.sh text eol=lf
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
+# Binary formats Git must not touch.
+*.so binary
+*.aar binary
+*.jar binary
+*.png binary

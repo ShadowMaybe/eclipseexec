@@ -1,0 +1,47 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'me.shadow.eclipselauncher.exec'
+    compileSdk 36
+
+    // Pinned so that CI, local builds and release builds compile against the
+    // same compiler. Change it here, not per-machine.
+    ndkVersion '28.2.13676358'
+
+    defaultConfig {
+        minSdk 21
+        consumerProguardFiles 'consumer-rules.pro'
+
+        // Builds libeclipseexec.so (all ABIs) and libeclipsehook.so (arm64-v8a)
+        // straight from the CMake project at the repository root, so the AAR is
+        // self-contained: no separate native build step to forget.
+        externalNativeBuild {
+            cmake {
+                abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86', 'x86_64'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    buildTypes {
+        release {
+            // A library that renames its own class breaks the RegisterNatives
+            // binding in JNI_OnLoad. Keep the class instead: the rule ships in
+            // consumer-rules.pro and applies to whatever app includes this.
+            minifyEnabled false
+        }
+    }
+}

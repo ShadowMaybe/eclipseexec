@@ -1,0 +1,141 @@
+name: CI
+
+# Builds and tests every push. Nothing is uploaded here: this workflow only
+# decides whether the tree is healthy. Published binaries come from
+# release.yml, which puts them on the Releases page rather than in artifacts —
+# artifacts count against storage quota and expire, releases do neither.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Host tests, JNI binding check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run the unit tests
+        run: sh tests/run_tests.sh
+
+  native:
+    name: Native build, all ABIs
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 28.2.13676358
+      CMAKE_VERSION: 3.22.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve Android SDK paths
+        run: |
+          # The runner owns this path; read it rather than assume it, then
+          # publish it so later steps and the cache action can use it.
+          echo "ANDROID_SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "NDK_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "CMAKE_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmake/$CMAKE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cache NDK and CMake
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.NDK_DIR }}
+            ${{ env.CMAKE_DIR }}
+          key: android-toolchain-${{ env.NDK_VERSION }}-${{ env.CMAKE_VERSION }}-${{ runner.os }}
+
+      - name: Install the pinned NDK, CMake and platform
+        run: |
+          sdkmanager="$ANDROID_SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$sdkmanager" ] || sdkmanager=$(command -v sdkmanager)
+          yes | "$sdkmanager" --install \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" >/dev/null
+          # The SDK's own cmake has ninja beside it, and is the same pair
+          # Gradle uses — putting it on PATH first keeps the two in step.
+          echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          export ANDROID_NDK="$NDK_DIR"
+          sh tools/build_native.sh arm64-v8a armeabi-v7a x86 x86_64
+
+      - name: Check exported symbols
+        run: |
+          export NM="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            sh tools/check_exports.sh "build/native/$abi/libeclipseexec.so" \
+              '^(JNI_OnLoad|JNI_OnUnload|eclipseexec_.*)$' \
+              JNI_OnLoad JNI_OnUnload \
+              eclipseexec_prepare_egl eclipseexec_acq_egl_handle \
+              eclipseexec_acq_vulkan_handle eclipseexec_set_native_dir \
+              eclipseexec_last_error eclipseexec_make_bigcore_affine
+            if [ "$abi" = arm64-v8a ]; then
+              sh tools/check_exports.sh "build/native/$abi/libeclipsehook.so" \
+                '^(eclipse_hook_arm|android_dlopen_ext|android_load_sphal_library|atrace_get_enabled_tags)$' \
+                eclipse_hook_arm android_dlopen_ext android_load_sphal_library atrace_get_enabled_tags
+            fi
+          done
+
+  aar:
+    name: Gradle AAR
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 28.2.13676358
+      CMAKE_VERSION: 3.22.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Resolve Android SDK paths
+        run: |
+          echo "ANDROID_SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "NDK_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "CMAKE_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmake/$CMAKE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cache the Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.NDK_DIR }}
+            ${{ env.CMAKE_DIR }}
+          key: android-toolchain-${{ env.NDK_VERSION }}-${{ env.CMAKE_VERSION }}-${{ runner.os }}
+
+      - name: Install the pinned NDK, CMake and platform
+        run: |
+          sdkmanager="$ANDROID_SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$sdkmanager" ] || sdkmanager=$(command -v sdkmanager)
+          yes | "$sdkmanager" --install \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" >/dev/null
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle', '**/*.gradle.kts') }}
+          restore-keys: gradle-
+
+      - name: Build the release AAR
+        run: ./gradlew --no-daemon --stacktrace :jni_bindings:assembleRelease
+
+      - name: Confirm the AAR carries the native libraries
+        run: |
+          aar=jni_bindings/build/outputs/aar/jni_bindings-release.aar
+          unzip -l "$aar" | tee /tmp/aar-contents.txt
+          for so in \
+            jni/arm64-v8a/libeclipseexec.so jni/armeabi-v7a/libeclipseexec.so \
+            jni/x86/libeclipseexec.so jni/x86_64/libeclipseexec.so \
+            jni/arm64-v8a/libeclipsehook.so; do
+            grep -q "$so" /tmp/aar-contents.txt || { echo "missing from AAR: $so" >&2; exit 1; }
+          done
+          echo "AAR contents look right"

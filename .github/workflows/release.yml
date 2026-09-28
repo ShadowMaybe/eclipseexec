@@ -1,0 +1,117 @@
+name: Release
+
+# Tag a version (git tag v0.1.0 && git push --tags) and this builds every ABI
+# plus the AAR, then publishes them to the GitHub Releases page.
+#
+# No actions/upload-artifact anywhere: release assets live on the Releases
+# page, which has no storage quota or expiry. Workflow runs without a tag
+# (manual dispatch) build and verify everything but publish nothing, so a tag
+# you push is never the first time the release path has been exercised.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build every ABI and publish
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 28.2.13676358
+      CMAKE_VERSION: 3.22.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Resolve Android SDK paths
+        run: |
+          echo "ANDROID_SDK=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "NDK_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "CMAKE_DIR=${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmake/$CMAKE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Cache the Android toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.NDK_DIR }}
+            ${{ env.CMAKE_DIR }}
+          key: android-toolchain-${{ env.NDK_VERSION }}-${{ env.CMAKE_VERSION }}-${{ runner.os }}
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle', '**/*.gradle.kts') }}
+          restore-keys: gradle-
+
+      - name: Install the pinned NDK, CMake and platform
+        run: |
+          sdkmanager="$ANDROID_SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$sdkmanager" ] || sdkmanager=$(command -v sdkmanager)
+          yes | "$sdkmanager" --install \
+            "ndk;$NDK_VERSION" "cmake;$CMAKE_VERSION" "platforms;android-36" >/dev/null
+          echo "$CMAKE_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Build the native libraries for every ABI
+        run: |
+          export ANDROID_NDK="$NDK_DIR"
+          sh tools/build_native.sh arm64-v8a armeabi-v7a x86 x86_64
+
+      - name: Check exported symbols
+        run: |
+          export NM="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            sh tools/check_exports.sh "build/native/$abi/libeclipseexec.so" \
+              '^(JNI_OnLoad|JNI_OnUnload|eclipseexec_.*)$' \
+              JNI_OnLoad JNI_OnUnload eclipseexec_prepare_egl \
+              eclipseexec_acq_egl_handle eclipseexec_acq_vulkan_handle
+            if [ "$abi" = arm64-v8a ]; then
+              sh tools/check_exports.sh "build/native/$abi/libeclipsehook.so" \
+                '^(eclipse_hook_arm|android_dlopen_ext|android_load_sphal_library|atrace_get_enabled_tags)$' \
+                eclipse_hook_arm android_dlopen_ext android_load_sphal_library atrace_get_enabled_tags
+            fi
+          done
+
+      - name: Build the AAR
+        run: ./gradlew --no-daemon --stacktrace :jni_bindings:assembleRelease
+
+      - name: Assemble the release assets
+        run: |
+          # A tag build is named after the tag; a manual run is staged but
+          # never published (the publish step only fires on tags).
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="unreleased-${GITHUB_SHA::12}"
+          fi
+          echo "packaging $TAG"
+          TAG="$TAG" sh tools/package_release.sh
+
+      - name: Publish to the Releases page
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Re-running a release workflow must update it, not fail on a
+          # release that already exists.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --title "eclipseexec $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          echo "published:"
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name'

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The namespace comes from build.gradle; the manifest exists because the
+  Android Gradle plugin requires one, not because this library declares
+  anything. eclipseexec needs no permissions: it reads /sys and /proc from the
+  app's own process and loads drivers from directories the app already owns.
+-->
+<manifest />
